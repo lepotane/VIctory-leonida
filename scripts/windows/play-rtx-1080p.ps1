@@ -93,6 +93,10 @@ $turbo = [ordered]@{
     VICTORY_CARD_BUFFERS_MIN_KB   = '64'
 
     # 16 GB VRAM / Bake Safety / Keep under local VRAM budget
+    # Keep VICTORY_SHADER_OPT unset (default bitmask 63 = passes 1..32); setting '1' disables passes 2..32 and misses cache-pareto
+    VICTORY_HOST_WAVE             = '32'
+    # Keep VICTORY_INPLACE='0' on RTX: L0 cross-adapter heaps stall queue::behind (24.7-28.2 FPS vs 14.0 FPS cap)
+    VICTORY_INPLACE               = '0'
     VICTORY_CARD_WINDOWS_MB       = '512'
     VICTORY_CARD_BUFFERS_MB       = '1024'
     VICTORY_TEXTURE_KEEP          = '0'
@@ -113,7 +117,7 @@ $turbo = [ordered]@{
 
     # Anti-Stutter, Dead RT Skip & Pipeline Pre-warming
     VICTORY_PIPELINE_BOOK         = '1'
-    VICTORY_DYNAMIC_SLOTS         = '524288'
+    VICTORY_DYNAMIC_SLOTS         = '499999'
     VICTORY_PIPELINE_WAIT_MS      = '10000'
     VICTORY_PIPELINE_WORKERS      = '12'
     VICTORY_SKIP_DEAD_RT          = '1'

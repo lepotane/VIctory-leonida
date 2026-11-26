@@ -17,3 +17,9 @@ game_dir = 'D:\victory-data\game'
 # Other Xbox Series titles used to test platform-level code.
 # env: VICTORY_TEST_TITLES (separated by ';')
 test_titles = []
+
+# Recommended RTX 1080p environment defaults (set by scripts/windows/play-rtx-1080p.ps1):
+#   VICTORY_INPLACE=0              (avoids L0 cross-adapter heap submit stalls on RTX)
+#   VICTORY_DYNAMIC_SLOTS=499999   (null/2 ceiling for 1M-capped host view heaps)
+#   VICTORY_HOST_WAVE=32           (force Wave32 compute lowering on 32-lane hosts)
+#   Note: keep VICTORY_SHADER_OPT unset (default bitmask 63 = passes 1..32; '1' skips passes 2..32 and misses cache)
