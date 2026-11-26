@@ -357,8 +357,9 @@ struct Lower<'a> {
     /// The first exchange dword of this thread's console wave ([`Self::exchange_pair`]).
     pair: Option<V>,
     /// A console wave64 program in host waves of 32: the LDS dword counting the console threads
-    /// handed to host waves (`wave_base`), and the base made in the entry block.
-    halves: Option<u32>,
+    /// handed to host waves (`wave_base`) and whether slot 0 aliases the title's 32 KiB LDS,
+    /// plus the base made in the entry block.
+    halves: Option<(u32, bool)>,
     wave_base: Option<V>,
     /// Vertex and mesh outputs holding 16-bit values: row, whether two per
     /// dword, and the row packed after it.
@@ -987,7 +988,7 @@ fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option
             }
         }
     }
-    if (0..n).any(|r| reads[r] && writes[r]) {
+    if (0..n).any(|r| reads[r] && writes[r]) && !super::loose_lds::on() {
         return None;
     }
     let mut meet = vec![(false, false); n];
@@ -1412,8 +1413,8 @@ impl<'a> Lower<'a> {
         let mut lds_meet: Option<(Vec<bool>, Vec<(bool, bool)>)> = None;
         // a console wave64 program in two host waves of 32 (`exchange`)
         let mut exchange: Option<(u32, bool, Vec<bool>)> = None;
-        // a console wave64 program in host waves of 32: the LDS dword of `wave_base`'s counter
-        let mut halves: Option<u32> = None;
+        // a console wave64 program in host waves of 32: the LDS dword of `wave_base`'s counter (+ alias flag)
+        let mut halves: Option<(u32, bool)> = None;
         if let StageIo::Cs(cs) = x.native.io {
             s.threads = Some(cs.threads);
             s.lds_dwords = cs.lds_bytes() / 4;
@@ -1437,19 +1438,18 @@ impl<'a> Lower<'a> {
             let one_wave = group <= wave;
             // A host whose waves are at most 32 lanes (NVIDIA) refuses `WaveSize(64)`. A console
             // wave64 program whose cross-lane code stays inside 32-lane halves – DPP rows,
-            // `ds_swizzle`, `v_permlane16` / `v_permlanex16`, which the ISA confines there – runs
-            // exactly in waves of 32: the thread relabelling makes each host wave one half of a
-            // console wave (lanes 32k..32k+31). Not when it crosses halves (`v_mbcnt`,
-            // `v_readlane`, `v_writelane`, `ds_(b)permute`, masks as numbers or lane-constant
-            // masks), nor when LDS may be shared within the console wave without barriers (a
-            // group over 32 threads with LDS): those still need 64-lane waves.
+            // `ds_swizzle`, `v_permlane16` / `v_permlanex16`, `ds_bpermute`, which the ISA
+            // confines there – runs exactly in waves of 32: the thread relabelling makes each
+            // host wave one half of a console wave (lanes 32k..32k+31). Not when it crosses
+            // halves (`v_mbcnt`, `v_readlane`, `v_writelane`, `ds_permute`, masks as numbers or
+            // lane-constant masks), nor when LDS may be shared within the console wave without
+            // barriers (a group over 32 threads with LDS): those still need 64-lane waves.
             if wave == 64 && host_max_wave() == 32 && (console_lanes || one_wave && s.lds_dwords > 0) {
                 let crosses = insts().any(|i| {
                     let n = i.name();
                     n.starts_with("v_mbcnt")
                         || matches!(n, "v_readlane_b32" | "v_writelane_b32")
                         || n.starts_with("ds_permute")
-                        || n.starts_with("ds_bpermute")
                         || reads_mask_as_data(x.st, i)
                 }) || lane_constant_masks(x.st)
                     || !x.st.wide.is_empty();
@@ -1492,8 +1492,15 @@ impl<'a> Lower<'a> {
                             if crosses {
                                 // lanes 32..63 are the other host wave: masks, lane reads and lane
                                 // numbers go through two exchange dwords past the program's LDS
-                                exchange = Some((s.lds_dwords, group <= 32, all));
-                                s.lds_dwords += 2 * group.div_ceil(64);
+                                // (local waves never touch the exchange slots, so allocate none).
+                                let extra = if LOCAL_WAVES.get() { 0 } else { 2 * group.div_ceil(64) };
+                                if s.lds_dwords + extra <= 8192 {
+                                    exchange = Some((s.lds_dwords, group <= 32, all));
+                                    s.lds_dwords += extra;
+                                } else {
+                                    wave = 64;
+                                    split_lds = false;
+                                }
                             }
                         }
                     }
@@ -1509,8 +1516,8 @@ impl<'a> Lower<'a> {
                             "v_readlane"
                         } else if n == "v_writelane_b32" {
                             "v_writelane"
-                        } else if n.starts_with("ds_permute") || n.starts_with("ds_bpermute") {
-                            "ds_(b)permute"
+                        } else if n.starts_with("ds_permute") {
+                            "ds_permute"
                         } else if reads_mask_as_data(x.st, i) {
                             "mask as data"
                         } else {
@@ -1538,9 +1545,15 @@ impl<'a> Lower<'a> {
                 }
             }
             if wave == 32 && x.native.wave64 {
-                // console threads go to host waves in the order the waves take them (`wave_base`)
-                halves = Some(s.lds_dwords);
-                s.lds_dwords += 1;
+                // console threads go to host waves in the order the waves take them (`wave_base`).
+                // Stay within D3D12's 32 KiB (8192 dword) groupshared limit by temporarily
+                // aliasing slot 0 if the title already allocated the full 32 KiB.
+                if s.lds_dwords < 8192 {
+                    halves = Some((s.lds_dwords, false));
+                    s.lds_dwords += 1;
+                } else {
+                    halves = Some((0, true));
+                }
             }
             if console_lanes || one_wave && s.lds_dwords > 0 {
                 s.wave_size = Some(wave);
@@ -2192,7 +2205,9 @@ impl<'a> Lower<'a> {
             .op(c, "splitDouble.f64", Attr::ReadNone, split_ty, 102, &[sum]);
         let mut r_lo = self.s.m.extract(c, split, 0);
         let mut r_hi = self.s.m.extract(c, split, 1);
-        if self.exchange.is_some() {
+        // as `wave_reduce`: a host wave on its own keeps its own sum
+        let own = self.local || self.exchange.as_ref().is_some_and(|e| e.1);
+        if self.exchange.is_some() && !own {
             if !self.all_lanes(self.cur_ir) {
                 need(self.cur_ir);
                 return Err("a wave reduction where not every lane runs");
@@ -4091,7 +4106,7 @@ impl<'a> Lower<'a> {
     /// zeroes it, the group meets, each wave's first lane adds 32 and the wave takes what it
     /// found. Branch-free, in the entry block, which every thread runs.
     fn wave_base(&mut self) -> Option<V> {
-        let slot = self.halves?;
+        let (slot, aliased) = self.halves?;
         if let Some(v) = self.wave_base {
             return Some(v);
         }
@@ -4110,6 +4125,12 @@ impl<'a> Lower<'a> {
         let old = self.s.m.atomic(e, Rmw::Add, ptr, add);
         let base = self.s.op(e, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[old]);
         self.s.flags |= flags::WAVE_OPS;
+        if aliased {
+            self.group_sync(e);
+            let ptr = self.s.m.element(e, lds, k);
+            self.s.m.store(e, ptr, zero);
+            self.group_sync(e);
+        }
         self.wave_base = Some(base);
         Some(base)
     }
@@ -4229,7 +4250,11 @@ impl<'a> Lower<'a> {
     fn scc_some(&mut self, scc: Value) -> Result<V, Why> {
         let &m = self.x.st.scc_some.get(&scc).ok_or(LANE_MASK)?;
         // (not for a console wave cut into host waves that do not exchange)
-        if !self.console_lanes || self.local || self.exchange.is_none() && self.halves.is_some() {
+        let local_any = self.local && self.local_any;
+        if !self.console_lanes
+            || (self.local && !local_any)
+            || (self.exchange.is_none() && self.halves.is_some())
+        {
             return Err(LANE_MASK);
         }
         let made = self.def_block.get(&scc).copied();
@@ -4242,7 +4267,7 @@ impl<'a> Lower<'a> {
         let (i1t, i32t) = (self.s.t.i1, self.s.t.i32);
         let some = self.s.op(at, "waveAnyTrue", Attr::NoUnwind, i1t, 113, &[bit]);
         self.s.flags |= flags::WAVE_OPS;
-        if !self.exchange.as_ref().is_some_and(|e| !e.1) {
+        if local_any || !self.exchange.as_ref().is_some_and(|e| !e.1) {
             return Ok(some);
         }
         if !made.is_none_or(|b| self.all_lanes(b)) {
@@ -4259,7 +4284,9 @@ impl<'a> Lower<'a> {
     fn wave_wide(&mut self, b: usize, when: Bool) -> Result<V, Why> {
         const WHY: Why = "a wave-wide branch where not every lane runs";
         let any = self.x.st.wave_any.get(b).copied().flatten().ok_or("a wave-wide branch on a scalar condition")?;
-        if self.exchange.is_none() && self.halves.is_none() && self.console_lanes && self.mask_data == MaskData::Console {
+        if (self.exchange.is_none() && self.halves.is_none() && self.console_lanes && self.mask_data == MaskData::Console)
+            || (self.local && self.local_any)
+        {
             // The host's waves are the console's: the wave's own answer. The lanes that are
             // elsewhere have no bit set, as on the console, so "some lane" needs no one but
             // the lanes here, and "every lane's bit is clear" is true of the others anyway.
@@ -4964,27 +4991,34 @@ impl<'a> Lower<'a> {
         if name == "ds_bpermute_b32" {
             // Backward permute: no LDS is touched. Each lane takes the data
             // register of the lane its address names, (address + offset) / 4
-            // within the wave; a source lane outside EXEC gives 0. (
-            // the title's checkerboard shadow-mask generators read their
-            // neighbours' samples with it; without them every shadowed light
-            // was multiplied by an empty mask.)
+            // within its own 32-lane half: a wave64 permutes lanes 0..31 and
+            // 32..63 independently (RDNA 2 ISA, section 10.4.4). A source
+            // lane outside EXEC gives 0. (The title's checkerboard
+            // shadow-mask generators read their neighbours' samples with it;
+            // without them every shadowed light was multiplied by an empty
+            // mask.) In host waves of 32 each host wave is one half of the
+            // console wave, so the lane named is always in this host wave.
             // shortcut: a source lane that is not at this instruction on the
             // host (it left through a branch, not a guard) is read as the
             // host gives it; the console reads 0.
             self.cross_lane(false)?;
-            if self.exchange.as_ref().is_some_and(|e| !e.1) {
-                // a console wave of 64 run as two host waves: the lane named
-                // may be in the other one
-                return Err("a lane permute across two host waves");
-            }
             let at = self.vgprs(inst, addr.as_ref().ok_or("a permute address")?, 1)?[0];
             let x = self.vgprs(inst, data.first().ok_or("a permute source")?, 1)?[0];
             let o = self.s.m.i32(offset);
             let at = self.s.m.bin(c, Bin::Add, at, o);
             let two = self.s.m.i32(2);
             let src = self.s.m.bin(c, Bin::LShr, at, two);
-            let last = self.s.m.i32(self.wave() - 1);
-            let src = self.s.m.bin(c, Bin::And, src, last);
+            let lanes = self.s.m.i32(31);
+            let src = self.s.m.bin(c, Bin::And, src, lanes);
+            let src = if self.x.native.wave64 {
+                // (0 in a host wave of 32, which holds one half.)
+                let me = self.lane_index();
+                let half = self.s.m.i32(!31);
+                let base = self.s.m.bin(c, Bin::And, me, half);
+                self.s.m.bin(c, Bin::Or, base, src)
+            } else {
+                src
+            };
             let x = match guard {
                 Some(g) => {
                     let z = self.s.m.i32(0);
@@ -8595,7 +8629,10 @@ impl<'a> Lower<'a> {
                     None if self.mask_data == MaskData::Console => {
                         // Each host wave taken as a wave of its own has no
                         // console lane numbers to pick the bits by.
-                        if self.local {
+                        // (approximate: lanes by the group's flat thread index, as in
+                        // compute and mesh groups)
+                        let threads = matches!(self.x.native.stage, HwStage::Cs | HwStage::Ms);
+                        if self.local && !(self.local_any && threads) {
                             return Err("a constant lane mask in a half-wave");
                         }
                         let m = mask.ok_or(UNTRACKED)?;
@@ -11109,7 +11146,10 @@ impl<'a> Lower<'a> {
             if kind == 5 && (*unorm || op == 81) {
                 return Err("a cube sample with texel coordinates or a level query");
             }
-            for (k, slot) in cs.iter_mut().enumerate().take(coords) {
+            // A level query takes no array slice (the code may pass anything
+            // there, e.g. an unwritten register; DXIL wants it undefined).
+            let read = if op == 81 { spatial } else { coords };
+            for (k, slot) in cs.iter_mut().enumerate().take(read) {
                 let x = addr_packed(self, coord_base, k)?;
                 *slot = to_float(self, x);
             }

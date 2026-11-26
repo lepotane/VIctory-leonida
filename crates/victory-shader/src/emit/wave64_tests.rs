@@ -736,3 +736,124 @@ fn the_lanes_past_a_count_of_threads_do_not_run() {
         }
     }
 }
+
+/// Lowers `body` as a console program of one 64-lane wave (or 32 when `wave64` is not set)
+/// for a host of 32-lane waves, validates it and runs it there; each lane stores v3 to dword
+/// v0 of the raw UAV. None where the host device does not run it.
+fn permuted(body: &[u32], wave64: bool) -> Option<Vec<u32>> {
+    let lanes = if wave64 { 64 } else { 32 };
+    let mut words = body.to_vec();
+    words.extend_from_slice(&[
+        0x340C_0082, // v_lshlrev_b32 v6, 2, v0
+        0xE070_1000,
+        0x8002_0306, // buffer_store_dword v3, v6, s[8:11], 0 offen
+    ]);
+    let native = native_of(&words, wave64, lanes);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let shader = lowered(&native, &p, &HashSet::new()).expect("lower");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    // The same program for a host of 64-lane waves lowers too.
+    let wide = lowered_on(&native, &p, &HashSet::new(), 64).expect("lower for 64-lane waves");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = wide.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed (64-lane waves)");
+    }
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else {
+        eprintln!("no SM 6.6 hardware device; not run");
+        return None;
+    };
+    let Ok((root, pso)) = host.compute_pipeline(&shader) else {
+        eprintln!("the hardware device does not take this program; not run");
+        return None;
+    };
+    let out = host
+        .dispatch(
+            &root,
+            &pso,
+            &Dispatch {
+                roots: vec![(0, Root::Constants(vec![0; shader.user_data_dwords().max(1) as usize]))],
+                views: &[View::RawUav(lanes)],
+                samplers: &[],
+                groups: [1, 1, 1],
+            },
+        )
+        .unwrap_or_else(|e| panic!("dispatch failed: {e}"));
+    Some(out[0][..lanes as usize].to_vec())
+}
+
+/// A wave64 `ds_bpermute_b32` permutes lanes 0..31 and 32..63 apart (RDNA 2 ISA, section
+/// 10.4.4): v1 = ((lane & 31) << 2) + 0x103 with offset 12 drops the high and sub-dword
+/// address bits and wraps inside each half (lanes 29..31 read 0..2, lanes 61..63 read 32..34,
+/// lane 32 reads lane 35, not lane 3). Run in host waves of 32, the program needs no exchange
+/// between them.
+#[test]
+fn a_wave64_backward_permute_stays_within_each_32_lane_half() {
+    let body = [
+        0x4A04_00FF,
+        0x0000_4000, // v_add_nc_u32 v2, 0x4000, v0
+        0x3602_009F, // v_and_b32 v1, 31, v0
+        0x3402_0282, // v_lshlrev_b32 v1, 2, v1
+        0x4A02_02FF,
+        0x0000_0103, // v_add_nc_u32 v1, 0x103, v1
+        0xDACC_000C,
+        0x0300_0201, // ds_bpermute_b32 v3, v1, v2 offset:12
+    ];
+    let Some(got) = permuted(&body, true) else { return };
+    let want: Vec<u32> = (0..64).map(|l| 0x4000 + ((l & !31) | ((l + 3) & 31))).collect();
+    assert_eq!(got, want);
+    eprintln!("ran on the hardware device: each half permuted on its own");
+}
+
+/// EXEC is per half too: with lanes 0..39 active, lanes 32..39 read upper-half lanes 40..47,
+/// which are inactive, and get 0 although lower-half lanes 8..15 are active. Lanes 40..63
+/// keep their v3.
+#[test]
+fn a_wave64_backward_permute_reads_exec_within_each_half() {
+    let body = [
+        0x4A04_00FF,
+        0x0000_5000, // v_add_nc_u32 v2, 0x5000, v0
+        0x4A06_00FF,
+        0xCAFE_0000, // v_add_nc_u32 v3, 0xcafe0000, v0
+        0x4A02_0088, // v_add_nc_u32 v1, 8, v0
+        0x3602_029F, // v_and_b32 v1, 31, v1
+        0x3402_0282, // v_lshlrev_b32 v1, 2, v1
+        0x7D88_00A8, // v_cmp_gt_u32 vcc, 40, v0
+        0xBE94_246A, // s_and_saveexec_b64 s[20:21], vcc
+        0xDACC_0000,
+        0x0300_0201, // ds_bpermute_b32 v3, v1, v2
+        0xBEFE_0414, // s_mov_b64 exec, s[20:21]
+    ];
+    let Some(got) = permuted(&body, true) else { return };
+    let want: Vec<u32> = (0..64)
+        .map(|l| match l {
+            0..32 => 0x5000 + ((l + 8) & 31),
+            32..40 => 0,
+            _ => 0xCAFE_0000 + l,
+        })
+        .collect();
+    assert_eq!(got, want);
+    eprintln!("ran on the hardware device: inactive lanes of the same half read 0");
+}
+
+/// A wave32 backward permute names lanes by bits 6:2 of the address: the high bits (0x100)
+/// and sub-dword bits (+3) are dropped.
+#[test]
+fn a_wave32_backward_permute_drops_the_high_and_sub_dword_address_bits() {
+    let body = [
+        0x4A04_00FF,
+        0x0000_3000, // v_add_nc_u32 v2, 0x3000, v0
+        0x4A02_0088, // v_add_nc_u32 v1, 8, v0
+        0x3402_0282, // v_lshlrev_b32 v1, 2, v1
+        0x4A02_02FF,
+        0x0000_0103, // v_add_nc_u32 v1, 0x103, v1
+        0xDACC_0000,
+        0x0300_0201, // ds_bpermute_b32 v3, v1, v2
+    ];
+    let Some(got) = permuted(&body, false) else { return };
+    let want: Vec<u32> = (0..32).map(|l| 0x3000 + ((l + 8) & 31)).collect();
+    assert_eq!(got, want);
+}

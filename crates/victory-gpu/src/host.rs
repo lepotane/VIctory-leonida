@@ -934,8 +934,13 @@ fn create() -> windows::core::Result<Host> {
             .CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, (&raw mut o1).cast(), size_of_val(&o1) as u32)
             .is_ok()
         {
-            tracing::info!(min = o1.WaveLaneCountMin, max = o1.WaveLaneCountMax, "host wave lanes");
-            victory_shader::emit::set_host_max_wave(o1.WaveLaneCountMax);
+            let override_wave = std::env::var("VICTORY_HOST_WAVE")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .filter(|&n| matches!(n, 32 | 64));
+            let max_wave = override_wave.unwrap_or(o1.WaveLaneCountMax);
+            tracing::info!(min = o1.WaveLaneCountMin, max = o1.WaveLaneCountMax, effective = max_wave, "host wave lanes");
+            victory_shader::emit::set_host_max_wave(max_wave);
             // (RDNA has waves of 32 and 64, the vendor's older cards of 64 alone.)
             let amd = crate::indirect::amd(&device);
             victory_shader::emit::set_host_rdna(amd && o1.WaveLaneCountMin == 32 && o1.WaveLaneCountMax == 64);

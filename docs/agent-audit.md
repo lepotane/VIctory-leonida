@@ -123,3 +123,19 @@ Measured at `1920x1080` on RTX 4060 Ti 16 GB (verified local release & `diag` lo
 ### Queued Follow-Up Targets (One Per Cycle After Gate Pass)
 - **Target B-1 (Wave64->Wave32 Compute Lowering):** Enable Wave32 lowering for the 3 live-dropped `water_shading` / `vfx_triangleClip` compute shaders (`#926c46bab3b86bd6`, `#a10179ab7eda0dc3`, `#02384a60fda6f2d0`) + remaining `GpuParticleEmit`/`shadowmask` hair compute shaders (`crates/victory-shader/src/emit/mod.rs`, `lower.rs`), plus fix the 3 `PS_MirrorReflectionDeferredTextured_AlphaClip` `out of bound coord must be undef` validator errors (`3` PS).
 - **Target C-1 (Descriptor & Staging Sync Overhead):** Diagnose why `VICTORY_DYNAMIC_SLOTS=524288` still exhausts dynamic descriptor slots and drops draws, and reduce the `15.5–19.4 ms` flight-wait / `9,214` no-op refresh steps inside `crates/victory-gpu`.
+
+---
+
+## 6. Target B-1 Verification (`VICTORY_HOST_WAVE=32` & DXIL Validation)
+
+Implemented runtime `VICTORY_HOST_WAVE` override (`crates/victory-gpu/src/host.rs`), Wave32 lowering improvements (`crates/victory-shader/src/emit/loose_lds.rs`, `lower.rs`, `mod.rs`: `ds_bpermute_b32` 32-lane half confinement, 8192-dword TGSM cap with uniform entry-block slot-0 aliasing for `wave_base`, `local_any` `scc_some`/`wave_wide`/`v_cndmask_b32`/`double_sum` support, and `VICTORY_WAVE_LDS_LOOSE`), and `CalculateLOD` array-slice coord undef handling (`op == 81`, keeping `VICTORY_WAVE_WIDE` off by default).
+
+- **`victory-shader` unit suite:** `285 passed; 0 failed; 4 ignored` (including `a_level_query_of_an_array_takes_no_slice` and all 4 `backward_permute` GPU + DXIL validation tests).
+- **`cargo clippy --workspace`:** `0` errors, `0` new warnings.
+- **Target `--warm` check (`VICTORY_HOST_WAVE=32`):** `4 / 4` target compute hashes (`#926c46bab3b86bd6`, `#a10179ab7eda0dc3`, `#02384a60fda6f2d0`, `#6b82bc7d22016cb5`) translated cleanly.
+- **Full `translate --validate` (`VICTORY_HOST_WAVE=32`, `dxil.dll` `10.0.26100.0`):**
+  - `XboxBvhBuilder.dll`: `52 / 52` emitted and validated.
+  - `shaders.rpf` (`26,084` programs):
+    - **VS/PS:** `14,247` emitted, **`14,223` validated** *(up from `14,220`; `out of bound coord must be undef` reduced **`3 -> 0`**)*.
+    - **Compute:** `2,677 / 2,682` emitted, **`2,677` validated (100% of emitted)** *(up from `2,651`; `no wave32 lowering for this wave64 program` reduced **`26 -> 0`** and TGSM `32900 > 32768` reduced **`2 -> 0`**, leaving only the 5 `descriptor read only as data` trace shaders)*.
+    - **Mesh:** `8,765` emitted, `8,673` validated *(unchanged, 0 regressions)*.

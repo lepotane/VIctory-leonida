@@ -90,6 +90,7 @@ mod diff_tests;
 mod intersect_tests;
 #[cfg(all(windows, any(test, feature = "host")))]
 pub mod host;
+mod loose_lds;
 mod lower;
 mod own_bits;
 #[cfg(all(test, windows))]
@@ -633,6 +634,48 @@ pub fn emit(
                 }
                 let local = lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
                 report("local waves (APPROXIMATE, any mask)", &local);
+                if done(&local) {
+                    return local.map(|(shader, _)| shader);
+                }
+            }
+        }
+        // Last of all (`VICTORY_WAVE_LDS_LOOSE=0` turns it off): LDS read and written inside
+        // one lane-branch region, ordered between the two host waves only where the region
+        // is entered and left (`loose_lds::with`, approximate). A 32-lane host refuses
+        // the 64-lane form outright, which drops every dispatch of the program.
+        let loose_on = std::env::var_os("VICTORY_WAVE_LDS_LOOSE").is_none_or(|v| v != "0");
+        if loose_on && !strict {
+            let bases = [forms[0].1.as_ref(), forms[1].1.as_ref()];
+            for (name, f) in [("without early-outs", bases[0]), ("without skips", bases[1])] {
+                if let Some((p, st, io, res)) = f {
+                    let again = loose_lds::with(|| emit_program(c, native, p, st, io, res));
+                    report(&format!("loose LDS (APPROXIMATE), {name}"), &again);
+                    if done(&again) {
+                        return again.map(|(shader, _)| shader);
+                    }
+                }
+            }
+            let again = loose_lds::with(|| emit_program(c, native, p, st, io, res));
+            report("loose LDS (APPROXIMATE)", &again);
+            if done(&again) {
+                return again.map(|(shader, _)| shader);
+            }
+            if local_on && !exact_only {
+                for (name, f) in [("without early-outs", bases[0]), ("without skips", bases[1])] {
+                    if let Some((p, st, io, res)) = f {
+                        let local = loose_lds::with(|| {
+                            lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res))
+                        });
+                        report(&format!("loose LDS + local waves (APPROXIMATE, any mask), {name}"), &local);
+                        if done(&local) {
+                            return local.map(|(shader, _)| shader);
+                        }
+                    }
+                }
+                let local = loose_lds::with(|| {
+                    lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res))
+                });
+                report("loose LDS + local waves (APPROXIMATE, any mask)", &local);
                 if done(&local) {
                     return local.map(|(shader, _)| shader);
                 }
@@ -1263,6 +1306,94 @@ mod tests {
         let sfi0 = host.part(FourCC::SFI0).unwrap().data;
         let features = u64::from_le_bytes(sfi0.try_into().unwrap());
         assert_ne!(features & 0x200, 0, "SFI0 {features:#x}: no StencilRef");
+    }
+
+    /// A level query (`image_get_lod`) of a 2D array passes no array slice:
+    /// DXIL's `CalculateLOD` takes the spatial coordinates only and the
+    /// validator refuses a defined third one ("out of bound coord must be
+    /// undef"), whatever the program left in that register.
+    #[test]
+    fn a_level_query_of_an_array_takes_no_slice() {
+        use crate::native::{ResourceType, RootParam, UsedResource};
+        let mut words = vec![
+            0xBE81_0380u32,
+            0xBE83_0380, // s1, s3 = 0 (upper halves of the tables)
+            0xF40C_0400,
+            0xFA00_0000, // 2D array SRV to s[16:23] from s[0:1]
+            0xF408_0601,
+            0xFA00_0000, // sampler to s[24:27] from s[2:3]
+        ];
+        for (reg, value) in [0.25f32, 0.5, 7.0].iter().enumerate() {
+            words.extend([0x7E00_02FF | ((reg as u32) << 17), value.to_bits()]);
+        }
+        words.extend([
+            0xBF8C_C07F, // s_waitcnt lgkmcnt(0)
+            // image_get_lod v[10:11], v[0:2], s[16:23], s[24:27] dmask:0x3 dim:2D_ARRAY
+            0xF000_0328 | (0x60 << 18),
+            0x00C4_0A00,
+            0xBF8C_3F70, // s_waitcnt vmcnt(0)
+            0xF800_180F,
+            0x0B0A_0B0A, // exp mrt0, v10, v11, v10, v11 done vm
+            0xBF81_0000,
+        ]);
+        let table = |slot, user_data| RootParam {
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            sgprs: 1,
+            base_register: 0,
+            user_data,
+            slot,
+        };
+        let range = |kind, words, slot, user_data| UsedResource {
+            kind,
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            lower_bound: 0,
+            stride: 0,
+            dwords: words,
+            user_data,
+            slot,
+        };
+        let native = NativeProgram {
+            stage: HwStage::Ps,
+            wave64: false,
+            vgprs: 12,
+            layout: vec![table(0, 0), table(1, 2)],
+            used: vec![range(ResourceType::Srv, 8, 0, 0), range(ResourceType::Sampler, 4, 1, 2)],
+            io: StageIo::Ps {
+                inputs: vec![],
+                input_addr: 0,
+                db_shader_control: 0,
+                patches: vec![],
+            },
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let target = SigElement {
+            name: "SV_Target".into(),
+            index: 0,
+            kind: 16,
+            comp: 9,
+            interp: 0,
+            row: Some(0),
+            col: 0,
+            cols: 4,
+            usage: 0xF,
+            half: false,
+        };
+        let osg1 = container::signature(&[target], false);
+        let bytes = crate::dxbc::build(&[(FourCC::OSG1, &osg1)]);
+        let c = Container::parse(&bytes).unwrap();
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        let out = emit(&c, &native, &p, &st, &io, &res).unwrap();
+        #[cfg(windows)]
+        if let Ok(mut v) = super::validator::Validator::load(
+            super::validator::Validator::default_path().as_deref(),
+        ) {
+            v.validate(&mut out.dxil.clone()).expect("the level query validates");
+        }
     }
 
     /// A pixel program with an ordered section, as the console compiler
