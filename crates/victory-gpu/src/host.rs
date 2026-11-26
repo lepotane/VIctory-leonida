@@ -1871,6 +1871,14 @@ fn scratch_pool() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_SCRATCH_POOL").is_none_or(|v| v != "0"))
 }
 
+/// Whether [`HostList::upload`] reuses pooled `L0 WRITE_BACK` / scratch
+/// upload buffers (`VICTORY_SHARED_POOL=1`; off by default to avoid stale
+/// copy-region state on character and texture uploads).
+fn shared_upload_pool() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SHARED_POOL").is_some_and(|v| v == "1"))
+}
+
 /// Things of some sizes that nothing holds now, kept for whoever next asks
 /// for one of the same size.
 struct Spare<T> {
@@ -6869,6 +6877,8 @@ impl HostList {
             let deferred = self.deferred();
             if !(deferred.copies.is_empty()
                 && deferred.uploads.is_empty()
+                && deferred.plane_uploads.is_empty()
+                && deferred.shared_uploads.is_empty()
                 && deferred.kept.is_empty()
                 && deferred.textures.is_empty()
                 && deferred.writes.is_empty()
@@ -7032,7 +7042,7 @@ impl HostList {
     /// reset (power-of-two pooled up to 8 MiB to eliminate per-frame shared/upload churn).
     pub(crate) fn upload(&self, host: &Host, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         let bucket = size.max(4096).next_power_of_two();
-        if bucket > (8 << 20) || !scratch_pool() {
+        if bucket > (8 << 20) || !scratch_pool() || !shared_upload_pool() {
             // With [`card_steps`] the card may be the one that fills it.
             let (buffer, data) = if card_steps::stage() > 1 { host.shared_buffer(size)? } else { host.upload_buffer(size)? };
             name(&buffer, || format!("list upload {size:#x}"));
