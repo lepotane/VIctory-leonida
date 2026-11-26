@@ -131,6 +131,28 @@ fn reflect_limit() -> f32 {
     })
 }
 
+fn parse_clamped(s: &str, min: f32, max: f32, default: f32) -> f32 {
+    s.trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .map_or(default, |v| v.clamp(min, max))
+}
+
+fn parse_flag(s: &str, default_on: bool) -> f32 {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return if default_on { 1.0 } else { 0.0 };
+    }
+    if default_on {
+        if trimmed == "0" { 0.0 } else { 1.0 }
+    } else if trimmed == "1" {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 /// Fully replace the title's probe light instead of taking `max(was, found)`.
 /// The title's ray-traced light was never produced on this host, so what it
 /// left in the texture is stale data: bright coloured patches (eyes, posters)
@@ -138,7 +160,24 @@ fn reflect_limit() -> f32 {
 fn overwrite() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
-        if std::env::var_os("VICTORY_AMBIENT_OVERWRITE").is_some_and(|v| v == "1") { 1.0 } else { 0.0 }
+        parse_flag(&std::env::var("VICTORY_AMBIENT_OVERWRITE").unwrap_or_default(), false)
+    })
+}
+
+/// Adaptive dark-scene ambient boost (`VICTORY_AMBIENT_DARK`, 0.0..=4.0, default 1.25).
+fn dark_gain() -> f32 {
+    static SET: OnceLock<f32> = OnceLock::new();
+    *SET.get_or_init(|| {
+        parse_clamped(&std::env::var("VICTORY_AMBIENT_DARK").unwrap_or_default(), 0.0, 4.0, 1.25)
+    })
+}
+
+/// Minimum unraytraced reflection floor relative to ambient around
+/// (`VICTORY_AMBIENT_REFLECT_FLOOR`, 0.0..=2.0, default 0.0).
+fn reflect_floor() -> f32 {
+    static SET: OnceLock<f32> = OnceLock::new();
+    *SET.get_or_init(|| {
+        parse_clamped(&std::env::var("VICTORY_AMBIENT_REFLECT_FLOOR").unwrap_or_default(), 0.0, 2.0, 0.0)
     })
 }
 
@@ -147,11 +186,7 @@ fn overwrite() -> f32 {
 fn reflect_clean() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
-        if std::env::var_os("VICTORY_AMBIENT_REFLECT_CLEAN").is_some_and(|v| v == "0") {
-            0.0
-        } else {
-            1.0
-        }
+        parse_flag(&std::env::var("VICTORY_AMBIENT_REFLECT_CLEAN").unwrap_or_default(), true)
     })
 }
 
@@ -159,11 +194,7 @@ fn reflect_clean() -> f32 {
 fn ambient_floor() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
-        std::env::var("VICTORY_AMBIENT_FLOOR")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .filter(|v: &f32| v.is_finite() && *v > 0.0)
-            .map_or(0.0, |v| v.clamp(0.0, 1.0))
+        parse_clamped(&std::env::var("VICTORY_AMBIENT_FLOOR").unwrap_or_default(), 0.0, 1.0, 0.0)
     })
 }
 
@@ -183,7 +214,7 @@ fn shade() -> [f32; 2] {
 }
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=12, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2)"
+#define RS "RootConstants(num32BitConstants=14, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2)"
 #define CX 64
 #define CY 36
 #define CELLS (CX * CY)
@@ -193,6 +224,7 @@ cbuffer Set : register(b0) {
     float level; float constant; float strength; float radius;
     float near; float tan_y; uint width; uint height;
     float follow; float most; float air; float unused;
+    float extra0; float extra1;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -328,10 +360,12 @@ uint pack(float3 c) {
 void clean_reflect(uint3 at : SV_DispatchThreadID) {
     if (at.x >= width || at.y >= height) return;
     float3 seen_there = unpack(light[at.xy]);
+    if (any(isnan(seen_there)) || any(isinf(seen_there))) seen_there = 0.0;
     float3 around = cells[CELLS].rgb;
     float around_luma = max(dot(around, LUMA), 0.08);
     float most = around_luma * air;
     float has = dot(seen_there, LUMA);
+    float3 floor_light = float3(1.0, 0.98, 0.94) * (around_luma * extra0);
     if (unused > 0.0) {
         float clamped_luma = min(has, most);
         // A warm neutral instead of `around`'s hue: the probe estimate is
@@ -345,10 +379,13 @@ void clean_reflect(uint3 at : SV_DispatchThreadID) {
         // Unraytraced reflections leave chromatic spikes and glowing eyes.
         // Pull most of the way to the neutral indirect colour; keep a little
         // of the original so metals still read as reflective.
-        light[at.xy] = pack(lerp(neutral, min(scaled, around * (air * 1.5)), 0.85 * valid));
+        float3 result = lerp(neutral, min(scaled, around * (air * 1.5)), 0.45 * valid);
+        if (extra0 > 0.0 && dot(result, LUMA) < dot(floor_light, LUMA)) result = floor_light;
+        light[at.xy] = pack(result);
         return;
     }
     if (has > most) light[at.xy] = pack(seen_there * (most / max(has, 1e-6)));
+    else if (extra0 > 0.0 && has < dot(floor_light, LUMA)) light[at.xy] = pack(floor_light);
 }
 #endif
 
@@ -411,29 +448,53 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
     found = clamp(found, 0.2 * all, 2.5 * all);
     float around_luma = dot(cells[CELLS].rgb, LUMA);
+    float darkness = 1.0 - smoothstep(0.08, 1.20, around_luma);
     found = lerp(found, cells[CELLS].rgb, 0.25) * level * open;
-    if (unused > 0.0) {
-        float3 base_tint = float3(0.92, 0.95, 1.0);
-        float3 scene_tint = around_luma > 1e-4 ? clamp(cells[CELLS].rgb / around_luma, 0.55, 1.45) : base_tint;
-        float3 tint = lerp(base_tint, scene_tint, 0.35);
-        tint /= max(dot(tint, LUMA), 1e-4);
-        float shadow_ao = lerp(0.24, 1.0, pow(saturate(open), 1.25));
-        float3 floor_light = tint * unused * shadow_ao;
-        float found_luma = dot(found, LUMA);
-        float knee = saturate(1.0 - found_luma / max(unused * 2.5, 1e-4));
-        found = max(found, floor_light) + floor_light * (0.30 * knee);
+    float found_luma = dot(found, LUMA);
+    if (extra1 > 0.0 && darkness > 0.0) {
+        float dark_boost = 1.0 + darkness * extra1 * saturate(1.0 - found_luma / 0.8);
+        found *= dark_boost;
+        found_luma = dot(found, LUMA);
+    }
+    float3 base_tint = float3(1.0, 0.98, 0.94);
+    float3 scene_tint = around_luma > 1e-4 ? clamp(cells[CELLS].rgb / around_luma, 0.75, 1.25) : base_tint;
+    float3 tint = lerp(base_tint, scene_tint, 0.30);
+    tint /= max(dot(tint, LUMA), 1e-4);
+    float eff_floor = max(unused, 0.18 * darkness * extra1);
+    if (eff_floor > 0.0) {
+        eff_floor *= (1.0 + 0.65 * darkness);
+        float ao_min = lerp(0.32, 0.52, darkness);
+        float shadow_ao = lerp(ao_min, 1.0, pow(saturate(open), 1.15));
+        float3 floor_light = tint * eff_floor * shadow_ao;
+        float knee = saturate(1.0 - found_luma / max(eff_floor * 3.0, 1e-4));
+        found = max(found, floor_light) + floor_light * (0.25 * knee);
+    }
+    if (extra0 > 0.5) {
+        light[p] = pack(found);
+        return;
     }
     float3 was = unpack(light[p]);
-    // Magenta (green far below red and blue) is what the probes' memory
-    // held, not light. Drop it: it showed as flat purple / pink glows on
-    // posters and eyes.
-    if (was.g < 0.5 * min(was.r, was.b) && max(was.r, was.b) > 0.02) was = 0.0;
+    if (any(isnan(was)) || any(isinf(was))) was = 0.0;
+    float was_luma = dot(was, LUMA);
+    float was_peak = max(was.r, max(was.g, was.b));
+    float was_min = min(was.r, min(was.g, was.b));
+    // Magenta and cold blue-violet spikes come from stale unraytraced probe
+    // memory; suppress them so night interiors and skin shadows stay clean.
+    bool magenta_garbage = (was.g < 0.5 * min(was.r, was.b) && max(was.r, was.b) > 0.02);
+    bool blue_violet_garbage = (was.b > 2.2 * max(was.r, was.g) && was.b > 0.02 && darkness > 0.25);
+    if (magenta_garbage || blue_violet_garbage) {
+        was = 0.0;
+        was_luma = 0.0;
+    } else if (was_peak > 2.5 * max(was_luma, 1e-4) && was_min < 0.15 * was_peak && darkness > 0.2) {
+        was = lerp(was, tint * was_luma, 0.75 * darkness);
+        was_luma = dot(was, LUMA);
+    }
     // What the program left counts as far as it can be true: the sky's light
     // outdoors, not the blocks of other memory.
-    float ref_luma = max(dot(found, LUMA), max(around_luma * level, unused * 1.5));
-    float top = max(ref_luma * most, 1e-6);
-    float has = dot(was, LUMA);
-    was *= min(1.0, top / max(has, 1e-6));
+    float ref_luma = max(dot(found, LUMA), max(around_luma * level, eff_floor * 1.5));
+    float cap_mult = lerp(most, min(most, 2.0), darkness);
+    float top = max(ref_luma * cap_mult, 1e-6);
+    was *= min(1.0, top / max(was_luma, 1e-6));
     light[p] = pack(max(was, found));
 }
 #endif
@@ -562,6 +623,8 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
             level,
             constant,
             floor = ambient_floor(),
+            overwrite = overwrite(),
+            dark_gain = dark_gain(),
             "a stand-in for the indirect light"
         );
     }
@@ -569,7 +632,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     list.keep(&pass.points);
     let [strength, radius] = shade();
     let floats = [level, constant, strength, radius, 0.1, 0.45];
-    let mut words = [0u32; 12];
+    let mut words = [0u32; 14];
     for (to, v) in words.iter_mut().zip(floats) {
         *to = v.to_bits();
     }
@@ -577,8 +640,17 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     words[7] = views.size[1];
     words[8] = 0.04f32.to_bits();
     words[9] = 4.0f32.to_bits();
-    words[10] = if role == Role::Reflect { reflect_limit() } else { air() }.to_bits();
-    words[11] = if role == Role::Reflect { reflect_clean() } else { ambient_floor() }.to_bits();
+    if role == Role::Reflect {
+        words[10] = reflect_limit().to_bits();
+        words[11] = reflect_clean().to_bits();
+        words[12] = reflect_floor().to_bits();
+        words[13] = 0.0f32.to_bits();
+    } else {
+        words[10] = air().to_bits();
+        words[11] = ambient_floor().to_bits();
+        words[12] = overwrite().to_bits();
+        words[13] = dark_gain().to_bits();
+    }
     let l = &list.list;
     // SAFETY: an open list with the heap of the views set; the title's
     // program has just used both views, so their textures are in the states
@@ -586,7 +658,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     unsafe {
         uav_barrier(l);
         l.SetComputeRootSignature(&pass.root);
-        l.SetComputeRoot32BitConstants(0, 12, words.as_ptr().cast(), 0);
+        l.SetComputeRoot32BitConstants(0, 14, words.as_ptr().cast(), 0);
         l.SetComputeRootDescriptorTable(1, views.depth);
         l.SetComputeRootDescriptorTable(2, views.image);
         l.SetComputeRootUnorderedAccessView(3, pass.cells.GetGPUVirtualAddress());
@@ -637,6 +709,23 @@ mod tests {
         assert_eq!(role(b"CS_AccumulateLocalLightInscatteringVolume_7e2f5eef"), Some(Role::Air));
         assert_eq!(role(b"CS_UpdateHistory_1234"), Some(Role::Reflect));
         assert_eq!(role(b"CS_TemporalResolve"), None);
+    }
+
+    #[test]
+    fn clamped_and_flag_parsers() {
+        assert_eq!(parse_clamped("", 0.0, 4.0, 1.25), 1.25);
+        assert_eq!(parse_clamped("nan", 0.0, 4.0, 1.25), 1.25);
+        assert_eq!(parse_clamped("inf", 0.0, 4.0, 1.25), 1.25);
+        assert_eq!(parse_clamped("-0.5", 0.0, 4.0, 1.25), 0.0);
+        assert_eq!(parse_clamped("9.0", 0.0, 4.0, 1.25), 4.0);
+        assert_eq!(parse_clamped(" 0.42 ", 0.0, 1.0, 0.0), 0.42);
+
+        assert_eq!(parse_flag("", false), 0.0);
+        assert_eq!(parse_flag("1", false), 1.0);
+        assert_eq!(parse_flag("0", false), 0.0);
+        assert_eq!(parse_flag("", true), 1.0);
+        assert_eq!(parse_flag("0", true), 0.0);
+        assert_eq!(parse_flag("1", true), 1.0);
     }
 
     /// The passes compile with the system's compiler and the host takes them.
