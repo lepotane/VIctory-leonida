@@ -98,6 +98,8 @@ $turbo = [ordered]@{
     # 16 GB VRAM / Bake Safety / Keep under local VRAM budget
     # Keep VICTORY_SHADER_OPT unset (default bitmask 63 = passes 1..32); setting '1' disables passes 2..32 and misses cache-pareto
     VICTORY_HOST_WAVE             = '32'
+    # Disable approximate half-wave loose_lds fallback on water volumetrics while keeping exact Wave32/CalculateLOD fixes
+    VICTORY_WAVE_LDS_LOOSE        = '0'
     # Keep VICTORY_INPLACE='0' on RTX: L0 cross-adapter heaps stall queue::behind (24.7-28.2 FPS vs 14.0 FPS cap)
     VICTORY_INPLACE               = '0'
     VICTORY_CARD_WINDOWS_MB       = '512'
@@ -120,7 +122,8 @@ $turbo = [ordered]@{
 
     # Anti-Stutter, Dead RT Skip & Pipeline Pre-warming
     VICTORY_PIPELINE_BOOK         = '1'
-    VICTORY_DYNAMIC_SLOTS         = '499999'
+    # Keep <= 262144 on NVIDIA 1M-capped view heaps; 499999 shrinks title_in_place to 500000 and cuts off bindless view slots 500,000..737,855
+    VICTORY_DYNAMIC_SLOTS         = '262144'
     VICTORY_PIPELINE_WAIT_MS      = '10000'
     VICTORY_PIPELINE_WORKERS      = '12'
     VICTORY_SKIP_DEAD_RT          = '1'
