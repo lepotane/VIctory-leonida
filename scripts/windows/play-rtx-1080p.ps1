@@ -96,10 +96,12 @@ $turbo = [ordered]@{
     # 16 GB VRAM / Bake Safety / Keep under local VRAM budget
     # Keep VICTORY_SHADER_OPT unset (default bitmask 63 = passes 1..32); setting '1' disables passes 2..32 and misses cache-pareto
     VICTORY_HOST_WAVE             = '32'
-    # Disable approximate half-wave loose_lds fallback on water volumetrics while keeping exact Wave32/CalculateLOD fixes
-    VICTORY_WAVE_LDS_LOOSE        = '0'
+    # Enable Wave32 loose_lds lowering for water_shading:CS_TransmissionVolumetrics* and vfx_triangleClip so water tiles are not dropped
+    VICTORY_WAVE_LDS_LOOSE        = '1'
     # Keep VICTORY_INPLACE='0' on RTX: L0 cross-adapter heaps stall queue::behind (24.7-28.2 FPS vs 14.0 FPS cap)
     VICTORY_INPLACE               = '0'
+    # Disable fused AVX2 shadow sync to avoid residual texture sync glitches
+    VICTORY_UNDER_FUSED           = '0'
     VICTORY_CARD_WINDOWS_MB       = '512'
     VICTORY_CARD_BUFFERS_MB       = '1024'
     VICTORY_TEXTURE_KEEP          = '0'
@@ -128,15 +130,16 @@ $turbo = [ordered]@{
     VICTORY_BVH_MISS              = '1'
 
     # Indirect Ambient Calibration, Night/Indoor Floor, Specular Cleaning, CAS Sharpen
-    VICTORY_AMBIENT               = '1.5'
-    VICTORY_AMBIENT_FLOOR         = '0.42'
+    VICTORY_AMBIENT               = '1.15'
+    VICTORY_AMBIENT_FLOOR         = '0.16'
+    VICTORY_AMBIENT_DARK          = '0.35'
     VICTORY_AMBIENT_SHADE         = '0.70,0.65'
     VICTORY_AMBIENT_AIR           = '1.2'
     VICTORY_AMBIENT_REFLECT       = '0.30'
     # Clean unraytraced reflections to prevent glowing eyes/glasses and dark-scene reflection spikes
     VICTORY_AMBIENT_REFLECT_CLEAN = '1'
     VICTORY_COMPOSE_SHARPEN       = '0.50'
-    VICTORY_SHADOW_LIFT           = '0.20'
+    VICTORY_SHADOW_LIFT           = '0.08'
 
     # Top-left live FPS / Smooth Motion HUD (toggle anytime with F3)
     VICTORY_PANEL                 = $(if ($NoPanel) { '0' } else { '1' })
