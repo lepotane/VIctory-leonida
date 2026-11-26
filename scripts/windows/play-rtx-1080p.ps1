@@ -109,8 +109,9 @@ $turbo = [ordered]@{
     VICTORY_UNDER_FUSED           = '0'
     VICTORY_CARD_WINDOWS_MB       = '512'
     VICTORY_CARD_BUFFERS_MB       = '1024'
-    VICTORY_TEXTURE_KEEP          = '0'
-    VICTORY_TEXTURE_ROOM_PERCENT  = '88'
+    # Raise texture VRAM room to 95% and keep textures resident to avoid hitting the 88% stall limit (~13.0/14.7 GB)
+    VICTORY_TEXTURE_KEEP          = '1'
+    VICTORY_TEXTURE_ROOM_PERCENT  = '95'
     VICTORY_BAKE_EXACT            = '1'
     VICTORY_BAKE_TEXTURES_MS      = '20000'
     VICTORY_EARLY_TEXTURES_MS     = '40'
@@ -137,17 +138,17 @@ $turbo = [ordered]@{
     VICTORY_BVH_MISS              = '1'
 
     # Indirect Ambient Calibration, Night/Indoor Floor, Specular Cleaning, CAS Sharpen
-    VICTORY_AMBIENT               = '1.0'
-    VICTORY_AMBIENT_FLOOR         = '0.18'
-    VICTORY_AMBIENT_DARK          = '0.35'
+    VICTORY_AMBIENT               = '1.25'
+    VICTORY_AMBIENT_FLOOR         = '0.26'
+    VICTORY_AMBIENT_DARK          = '0.65'
     VICTORY_AMBIENT_SHADE         = '0.70,0.65'
     VICTORY_AMBIENT_AIR           = '1.5'
     VICTORY_AMBIENT_MOST          = '2'
-    VICTORY_AMBIENT_REFLECT       = '0.20'
+    VICTORY_AMBIENT_REFLECT       = '0.15'
     # Clean unraytraced reflections to prevent glowing eyes/glasses and dark-scene reflection spikes
     VICTORY_AMBIENT_REFLECT_CLEAN = '1'
     VICTORY_COMPOSE_SHARPEN       = '0.50'
-    VICTORY_SHADOW_LIFT           = '0.08'
+    VICTORY_SHADOW_LIFT           = '0.12'
 
     # Top-left live FPS / Smooth Motion HUD (toggle anytime with F3)
     VICTORY_PANEL                 = $(if ($NoPanel) { '0' } else { '1' })
