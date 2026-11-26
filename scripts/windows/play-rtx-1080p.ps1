@@ -85,11 +85,14 @@ $turbo = [ordered]@{
     VICTORY_MAP_THREADS           = '1'
     VICTORY_TITLE_PRIORITIES      = '0'
     VICTORY_CARD_AWAKE            = '1'
+    # Widen early descriptor sync budget (16 ms vs default 4 ms) to prevent stale view bindings on character textures
+    VICTORY_HEAP_SYNC_EARLY       = '16'
     VICTORY_SHOW_AFTER            = '1'
     VICTORY_THIN                  = '1'
     VICTORY_JOIN_PARTS            = '8'
     VICTORY_UPLOAD_AHEAD          = '1'
-    VICTORY_LEVELS_ON_DEMAND      = '1'
+    # Disable partial on-demand level tiling (avoids ~2,600-4,085 partial texture slots & VRAM pressure spikes)
+    VICTORY_LEVELS_ON_DEMAND      = '0'
     VICTORY_CARD_BUFFERS_MIN_KB   = '64'
 
     # 16 GB VRAM / Bake Safety / Keep under local VRAM budget
@@ -129,7 +132,8 @@ $turbo = [ordered]@{
     VICTORY_AMBIENT_SHADE         = '0.70,0.65'
     VICTORY_AMBIENT_AIR           = '1.2'
     VICTORY_AMBIENT_REFLECT       = '0.30'
-    VICTORY_AMBIENT_REFLECT_CLEAN = '1'
+    # Keep scene-hue reflect tinting off so coastal/water surfaces do not pick up a green ambient band
+    VICTORY_AMBIENT_REFLECT_CLEAN = '0'
     VICTORY_COMPOSE_SHARPEN       = '0.50'
     VICTORY_SHADOW_LIFT           = '0.20'
 
