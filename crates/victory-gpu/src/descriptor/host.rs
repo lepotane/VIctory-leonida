@@ -1488,17 +1488,36 @@ pub(crate) const DYNAMIC: u32 = 1 << 18;
 /// sets the most). 2^18 ran out in the title's bigger places (session
 /// play-1125-0127: 27,000 to 35,000 tables a frame, up to 3,285 of them
 /// refused, with 2,639 indirect draws and dispatches).
+fn dynamic_slots_capped(null: u32, asked: Option<u32>) -> u32 {
+    if null == 0 {
+        return DYNAMIC;
+    }
+    let max_half = (null / 2).max(DYNAMIC);
+    asked.unwrap_or(DYNAMIC).clamp(DYNAMIC, max_half)
+}
+
 fn dynamic_slots(count: u32, null: u32) -> u32 {
-    static MOST: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    let most = *MOST.get_or_init(|| {
+    static ASKED: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let asked = *ASKED.get_or_init(|| {
         std::env::var("VICTORY_DYNAMIC_SLOTS")
             .ok()
             .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(DYNAMIC << 2)
     });
     if null < PORTABLE_VIEWS {
-        return DYNAMIC;
+        static CAPPED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        return *CAPPED.get_or_init(|| {
+            let slots = dynamic_slots_capped(null, asked);
+            if slots != DYNAMIC {
+                tracing::info!(
+                    slots,
+                    title_in_place = null.saturating_sub(slots),
+                    "expanded dynamic descriptor slots on capped view heap (VICTORY_DYNAMIC_SLOTS)"
+                );
+            }
+            slots
+        });
     }
+    let most = asked.unwrap_or(DYNAMIC << 2);
     null.saturating_sub(count).min(most).max(DYNAMIC)
 }
 
@@ -6047,6 +6066,15 @@ pub(crate) fn list_views() -> bool {
 #[cfg(test)]
 mod bake_flip_tests {
     use super::*;
+
+    #[test]
+    fn dynamic_slots_capped_honors_env_within_half_heap() {
+        assert_eq!(dynamic_slots_capped(0, Some(524_288)), DYNAMIC);
+        assert_eq!(dynamic_slots_capped(999_999, None), DYNAMIC);
+        assert_eq!(dynamic_slots_capped(999_999, Some(524_288)), 499_999);
+        assert_eq!(dynamic_slots_capped(999_999, Some(1)), DYNAMIC);
+        assert_eq!(dynamic_slots_capped(999_999, Some(384_000)), 384_000);
+    }
 
     #[test]
     fn pending_list_flips_promote_once_and_clean_up() {
