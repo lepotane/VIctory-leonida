@@ -118,6 +118,16 @@ fn air() -> f32 {
     })
 }
 
+/// Cap on what the title's own probes may keep relative to the estimate
+/// (`VICTORY_AMBIENT_MOST=<multiple>`, 4.0 when unset).
+fn most() -> f32 {
+    static SET: OnceLock<f32> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let set = std::env::var("VICTORY_AMBIENT_MOST").unwrap_or_default();
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v > 0.0).unwrap_or(4.0)
+    })
+}
+
 /// Reflection luminance cap relative to ambient mean (`VICTORY_AMBIENT_REFLECT`,
 /// unset/0: disabled).
 fn reflect_limit() -> f32 {
@@ -639,7 +649,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     words[6] = views.size[0];
     words[7] = views.size[1];
     words[8] = 0.04f32.to_bits();
-    words[9] = 4.0f32.to_bits();
+    words[9] = most().to_bits();
     if role == Role::Reflect {
         words[10] = reflect_limit().to_bits();
         words[11] = reflect_clean().to_bits();

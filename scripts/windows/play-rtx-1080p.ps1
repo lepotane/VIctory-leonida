@@ -24,7 +24,9 @@ param(
     [switch]$SmoothMotion,
     [switch]$NoPanel,
     # Real ray-traced indirect light. Off by default on RTX (wave32 builder instability).
-    [switch]$RT
+    [switch]$RT,
+    # Extra geometry/body stability at ~5-7 FPS cost (VICTORY_RELAY=1, VICTORY_CARD_STEPS=0).
+    [switch]$Quality
 )
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -73,7 +75,8 @@ $cacheDir = Join-Path $env:LOCALAPPDATA 'VIctory\cache-pareto'
 $turbo = [ordered]@{
     VICTORY_CACHE_DIR             = $cacheDir
     VICTORY_DISPLAY_MODE          = $DisplayMode
-    VICTORY_TEXTURE_NO_WAIT       = '1'
+    # Wait for runtime memory remapping during texture refreshes to prevent rainbow/stale skin textures
+    VICTORY_TEXTURE_NO_WAIT       = '0'
     VICTORY_RELAY                 = '2'
     VICTORY_WIDE_BACK             = '1'
     VICTORY_CARD_REHASH_RUNS      = '1'
@@ -98,6 +101,8 @@ $turbo = [ordered]@{
     VICTORY_HOST_WAVE             = '32'
     # Enable Wave32 loose_lds lowering for water_shading:CS_TransmissionVolumetrics* and vfx_triangleClip so water tiles are not dropped
     VICTORY_WAVE_LDS_LOOSE        = '1'
+    # Scrub NaN/Inf on pixel color and float image stores to prevent black blobs on water and white flashes
+    VICTORY_NAN_SCRUB             = '1'
     # Keep VICTORY_INPLACE='0' on RTX: L0 cross-adapter heaps stall queue::behind (24.7-28.2 FPS vs 14.0 FPS cap)
     VICTORY_INPLACE               = '0'
     # Disable fused AVX2 shadow sync to avoid residual texture sync glitches
@@ -127,15 +132,18 @@ $turbo = [ordered]@{
     VICTORY_PIPELINE_WAIT_MS      = '10000'
     VICTORY_PIPELINE_WORKERS      = '12'
     VICTORY_SKIP_DEAD_RT          = '1'
+    # Keep screen-probe ray activation running so screen-probe outputs are not left as rainbow glitter garbage
+    VICTORY_ACTIVATE_RAYS         = '1'
     VICTORY_BVH_MISS              = '1'
 
     # Indirect Ambient Calibration, Night/Indoor Floor, Specular Cleaning, CAS Sharpen
-    VICTORY_AMBIENT               = '1.15'
-    VICTORY_AMBIENT_FLOOR         = '0.16'
+    VICTORY_AMBIENT               = '1.0'
+    VICTORY_AMBIENT_FLOOR         = '0.18'
     VICTORY_AMBIENT_DARK          = '0.35'
     VICTORY_AMBIENT_SHADE         = '0.70,0.65'
-    VICTORY_AMBIENT_AIR           = '1.2'
-    VICTORY_AMBIENT_REFLECT       = '0.30'
+    VICTORY_AMBIENT_AIR           = '1.5'
+    VICTORY_AMBIENT_MOST          = '2'
+    VICTORY_AMBIENT_REFLECT       = '0.20'
     # Clean unraytraced reflections to prevent glowing eyes/glasses and dark-scene reflection spikes
     VICTORY_AMBIENT_REFLECT_CLEAN = '1'
     VICTORY_COMPOSE_SHARPEN       = '0.50'
@@ -155,6 +163,11 @@ if ($RT) {
     $turbo['VICTORY_BVH_BUILDER'] = '1'
     $turbo['VICTORY_SKIP_DEAD_RT'] = '0'
     $turbo['VICTORY_AMBIENT'] = 'off'
+}
+
+if ($Quality) {
+    $turbo['VICTORY_RELAY'] = '1'
+    $turbo['VICTORY_CARD_STEPS'] = '0'
 }
 
 foreach ($name in $turbo.Keys) { Set-Item -Path "Env:$name" -Value $turbo[$name] }
