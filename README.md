@@ -57,9 +57,9 @@ Eliminates initial shader/PSO compile stutters into `%LOCALAPPDATA%\VIctory\cach
 ```
 
 ### 3. Launch at 1080p
-Point at your own legally obtained title dump outside this repository and run the 1080p RTX preset:
+Point `$env:VICTORY_GAME_DIR` at your own legally obtained Xbox Series title dump containing `game_scarlett_master.exe` (outside this repository) and run the 1080p RTX preset:
 ```powershell
-$env:VICTORY_GAME_DIR = 'D:\Games\MyXboxDump'
+$env:VICTORY_GAME_DIR = 'D:\Games\MyXboxDump'   # contains game_scarlett_master.exe
 .\scripts\windows\play-rtx-1080p.ps1 -SmoothMotion
 ```
 
@@ -74,7 +74,14 @@ Useful flags:
 
 ## Performance Snapshot (`1920x1080`, Xbox Series S Profile)
 
-Full measurement methodology and hardware details (Ryzen 9 9950X3D + RTX 4060 Ti 16 GB, Driver `621.40`) are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Full measurement methodology and hardware details (Ryzen 9 9950X3D + RTX 4060 Ti 16 GB, Driver `621.40`) are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and open items in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
+
+### Verified Status (`1920x1080`, NVIDIA GeForce RTX 4060 Ti 16 GB, Ryzen 9 9950X3D, 64 GB RAM, Win11 x64)
+- [x] **Exe loads & runs** (`game_scarlett_master.exe` via Xbox Series S profile)
+- [x] **First frame / boots** (`display mode width=1920 height=1080`)
+- [x] **Main menu** (`30+ FPS`)
+- [x] **In the world** (`1920x1080` native D3D12 rendering)
+- [x] **Playable opening sequence** (`0` refused views, `0` device-removed errors)
 
 - **Native World FPS:** `19.4` median / `18.1` avg / `24.1` peak FPS (up from `16.5` median / `20.4` peak baseline)
 - **With NVIDIA Smooth Motion (`-SmoothMotion`):** `~32.8 – 48.2 OUT FPS` (median `~38.8 OUT`)
